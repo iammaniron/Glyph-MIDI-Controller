@@ -58,6 +58,8 @@ Only GP26–GP29 read analog voltages. The GND end reads 127 and the 3.3V end 0;
    Or with circup: `circup install adafruit_midi adafruit_display_text adafruit_display_shapes adafruit_imageload adafruit_displayio_sh1106 adafruit_displayio_ssd1306 adafruit_debouncer simpleio`
 3. Copy `glyph_mini_2040_midi_keyset/code.py` and `main.bmp` to the root of `CIRCUITPY`. The board restarts by itself every time `code.py` is saved.
 
+Tested with CircuitPython 10.3.1 (Glyph Mini 2040 build) and the 10.x library bundle.
+
 ## Controls
 | Control | Action |
 |---|---|
