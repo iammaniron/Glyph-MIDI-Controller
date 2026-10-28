@@ -4,25 +4,25 @@
 #
 # Adapted for the PCB Cupid Glyph Mini 2040 (CircuitPython 10.x, Glyph Mini 2040 build):
 #   - pins mapped to the Glyph Mini 2040 GPIO numbers (see PIN MAP below)
-#   - SH1106 1.3" OLED support (with the panel's 2-column offset)
+#   - SSD1306 or SH1106 128x64 OLED support
 #   - Pot B sends pitch bend; pot readings are averaged and de-jittered
 #   - runs without the OLED if none is connected (MIDI keys still work)
 #   - potentiometers can be switched off until they are wired (floating ADC pins
 #     would otherwise send random CC messages)
 #
 # PIN MAP (Glyph Mini 2040 GPIO -> part)
-#   Keys 1-5        : GP0 GP1 GP2 GP3 GP4 (other leg of each switch to GND)
-#   Encoder A / B   : GP14 / GP15   (encoder middle pin to GND)
-#   Encoder button  : GP8           (other leg to GND)
-#   Pots A / B / C  : wiper to GP29 / GP28 / GP27, outer legs to 3V3 and GND
-#   OLED 128x64 I2C : SDA -> GP6, SCL -> GP7 (an I2C1 pair; GP8/GP9 are taken by the encoder button)
+#   Keys 1-6        : GP2 GP3 GP4 GP5 GP6 GP7 (other leg of each switch to GND)
+#   Encoder A / B   : GP8 / GP9   (encoder middle pin to GND)
+#   Encoder button  : GP10          (other leg to GND)
+#   Pots A / B / C  : wiper to GP26 / GP27 / GP28, outer legs to 3V3 and GND
+#   OLED 128x64 I2C : SDA -> GP0, SCL -> GP1 (I2C0; GP8/GP9 are the encoder)
 
 import board
+import time
 import busio
 import simpleio
 import displayio
 import i2cdisplaybus
-import adafruit_imageload
 import rotaryio
 import digitalio
 import terminalio
@@ -30,6 +30,7 @@ import keypad
 from digitalio import DigitalInOut, Direction
 from adafruit_display_text import label
 from adafruit_display_shapes.rect import Rect
+from adafruit_display_shapes.roundrect import RoundRect
 import adafruit_displayio_ssd1306
 import adafruit_displayio_sh1106
 import usb_midi
@@ -60,7 +61,7 @@ MIDI_NOTE_NAMES = [
 
 
 # Set to True once the three potentiometers are wired to A2 / A1 / A0
-POTS_CONNECTED = True    # pots on GP29/GP28/GP27, tested 0-3.3 V
+POTS_CONNECTED = True    # pots on GP26/GP27/GP28, tested 0-3.3 V
 
 # Pot B sends pitch bend (understood by synth apps without MIDI learn) instead of a CC.
 # Centre of the pot = normal pitch. Set to False to make Pot B send its CC number again.
@@ -75,15 +76,15 @@ INSTRUMENTS = [            # (name shown on OLED, GM program number or None for 
     ("Lead", 80), ("Pad", 88), ("Drums", None),
 ]
 DRUM_CHANNEL = 9           # MIDI channel 10 (0-based 9) is the GM drum channel
-DRUM_NOTES = [36, 38, 42, 46, 49]  # keys 1-5: kick, snare, closed hat, open hat, crash
+DRUM_NOTES = [36, 38, 42, 46, 49, 51]  # keys 1-6: kick, snare, closed/open hat, crash, ride
 current_instrument = -1
 
-# OLED settings: generic 1.3" I2C modules are usually SH1106 at 0x3C;
-# Adafruit's 1.3" OLED is SSD1306 at 0x3D. If the picture is shifted or garbled, try the other.
-OLED_DRIVER = "SH1106"   # "SH1106" or "SSD1306"
+# Set these two values to match the OLED fitted to your board.
+# Common I2C addresses are 0x3C and 0x3D; see README if the screen is blank.
+OLED_DRIVER = "SSD1306"  # "SH1106" or "SSD1306"
 OLED_ADDRESS = 0x3C
-OLED_SDA = board.GP6
-OLED_SCL = board.GP7
+OLED_SDA = board.GP0
+OLED_SCL = board.GP1
 OLED_CONTRAST = 0xFF     # brightness 0x01..0xFF - lower it if filled areas look striped
 
 # Data structure to store all control settings
@@ -99,6 +100,7 @@ control_settings = {
         {'note': 66, 'velocity': 120, 'channel': 0},  # Key 3
         {'note': 68, 'velocity': 120, 'channel': 0},  # Key 4
         {'note': 73, 'velocity': 120, 'channel': 0},  # Key 5
+        {'note': 75, 'velocity': 120, 'channel': 0},  # Key 6
     ]
 }
 
@@ -107,7 +109,7 @@ midi_notes = [key['note'] for key in control_settings['keys']]
 
 
 #rotary encoder and button
-encoder = rotaryio.IncrementalEncoder(board.GP14, board.GP15)
+encoder = rotaryio.IncrementalEncoder(board.GP8, board.GP9)
 last_position = 0
 
 #  midi setup
@@ -115,21 +117,22 @@ midi = adafruit_midi.MIDI(midi_out=usb_midi.ports[1], out_channel=0)
 
 # Create keypad object with the pins (removed encoder button)
 keys = keypad.Keys(
-    pins=(board.GP0, board.GP1, board.GP2, board.GP3, board.GP4),
+    pins=(board.GP2, board.GP3, board.GP4, board.GP5, board.GP6, board.GP7),
     value_when_pressed=False,  # Buttons pull to ground when pressed
     pull=True  # Enable internal pull-up resistors
 )
+held_keys = [None] * 6  # (note, channel) used to release the exact note that started
 
 # Set up encoder button with debouncer
-encoder_button_pin = DigitalInOut(board.GP8)
+encoder_button_pin = DigitalInOut(board.GP10)
 encoder_button_pin.direction = Direction.INPUT
 encoder_button_pin.pull = digitalio.Pull.UP
 encoder_button = Button(encoder_button_pin, value_when_pressed=False, long_duration_ms=500)
 
 #  potentiometer setup
-pot_A = AnalogIn(board.GP29)
-pot_B = AnalogIn(board.GP28)
-pot_C = AnalogIn(board.GP27)
+pot_A = AnalogIn(board.GP26)
+pot_B = AnalogIn(board.GP27)
+pot_C = AnalogIn(board.GP28)
 
 #display setup
 displayio.release_displays()
@@ -137,6 +140,7 @@ displayio.release_displays()
 # oled (optional - without it the keys still send MIDI)
 WIDTH = 128
 HEIGHT = 64
+oled_ready = False
 try:
     i2c = busio.I2C(OLED_SCL, OLED_SDA)
     display_bus = i2cdisplaybus.I2CDisplayBus(i2c, device_address=OLED_ADDRESS)
@@ -147,6 +151,7 @@ try:
         display.brightness = OLED_CONTRAST / 255  # driver's own contrast command
     else:
         display = adafruit_displayio_ssd1306.SSD1306(display_bus, width=WIDTH, height=HEIGHT)
+    oled_ready = True
     print("OLED found:", OLED_DRIVER, hex(OLED_ADDRESS))
 except (ValueError, RuntimeError, OSError, AttributeError) as e:
     print("No OLED at", hex(OLED_ADDRESS), "- running without display:", e)
@@ -156,83 +161,91 @@ except (ValueError, RuntimeError, OSError, AttributeError) as e:
 
     display = _NoDisplay()
 
-bitmap, palette = adafruit_imageload.load("/main.bmp",
-                                          bitmap=displayio.Bitmap,
-                                          palette=displayio.Palette)
+if oled_ready:
+    splash = displayio.Group()
+    splash.append(label.Label(terminalio.FONT, text="GLYPH MIDI",
+                              color=0xFFFFFF, x=34, y=16))
+    notes = displayio.Group(x=15, y=27)
+    notes.append(RoundRect(0, 13, 8, 6, 3, fill=0xFFFFFF))
+    notes.append(Rect(6, 0, 2, 16, fill=0xFFFFFF))
+    notes.append(RoundRect(15, 13, 8, 6, 3, fill=0xFFFFFF))
+    notes.append(Rect(21, 0, 2, 16, fill=0xFFFFFF))
+    notes.append(Rect(7, 0, 16, 3, fill=0xFFFFFF))
+    splash.append(notes)
+    display.root_group = splash
+    for frame in range(20):
+        notes.x = 15 + frame * 4
+        notes.y = 27 + (frame % 4) // 2
+        time.sleep(0.035)
+    time.sleep(1.0)
 
-# Create a TileGrid to hold the bitmap
-bitmap_grid = displayio.TileGrid(bitmap, pixel_shader=palette)
-
-# Create main page
+# Home screen: three live knobs above six notes in physical order.
 maingroup = displayio.Group()
 
-#dictionary for rectangle highlights
 rect_dict = [
-    {'pos': (0, 0), 'dim': (42, 32)},
-    {'pos': (42, 0), 'dim': (42, 32)},
-    {'pos': (84, 0), 'dim': (42, 32)},
-    {'pos': (1, 32), 'dim': (25, 32)},
-    {'pos': (26, 32), 'dim': (25, 32)},
-    {'pos': (51, 32), 'dim': (25, 32)},
-    {'pos': (76, 32), 'dim': (25, 32)},
-    {'pos': (101, 32), 'dim': (25, 32)},
+    {'pos': (0, 2), 'dim': (42, 29)},
+    {'pos': (42, 2), 'dim': (42, 29)},
+    {'pos': (84, 2), 'dim': (44, 29)},
 ]
+for key_index in range(6):
+    rect_dict.append({'pos': (1 + key_index * 21, 34), 'dim': (21, 29)})
+
+key_panels = []
+key_rings = []
+key_ring_until = [0] * 6
+for index, box in enumerate(rect_dict):
+    x, y = box['pos']
+    w, h = box['dim']
+    inset = 2 if index < 3 else 1
+    panel = RoundRect(x + inset, y + 2, w - 2 * inset, h - 4,
+                      3 if index < 3 else 6,
+                      fill=0xFFFFFF if index < 3 else None,
+                      outline=None if index < 3 else 0xFFFFFF)
+    maingroup.append(panel)
+    if index >= 3:
+        key_panels.append(panel)
+        ring = RoundRect(x, y, w, h, 7, fill=None, outline=0xFFFFFF)
+        ring.hidden = True
+        maingroup.append(ring)
+        key_rings.append(ring)
+
+for title, center in (("MOD", 21), ("BEND", 63), ("EXPR", 106)):
+    heading = label.Label(terminalio.FONT, text=title, color=0x000000)
+    heading.anchor_point = (0.5, 0)
+    heading.anchored_position = (center, 7)
+    maingroup.append(heading)
 
 current_index = 0
 rect_info = rect_dict[current_index]
 x, y = rect_info['pos']
 w, h = rect_info['dim']
-
-# Create the rectangle (outline only, no fill)
-rectangle = Rect(x, y, w, h, fill=None, outline=0xFFFFFF)
-
-# Add rectangles to the Group
-maingroup.append(bitmap_grid)
+rectangle = RoundRect(x, y, w, h, 6, fill=None, outline=0xFFFFFF)
 maingroup.append(rectangle)
 
-#text container
 keynote_maingroup = displayio.Group()
-font = terminalio.FONT
-color = 0x000000
-
 keynotes = [
-    {'num': control_settings['keys'][0]['note'], 'pos': (14, 42)},
-    {'num': control_settings['keys'][1]['note'], 'pos': (39, 42)},
-    {'num': control_settings['keys'][2]['note'], 'pos': (64, 42)},
-    {'num': control_settings['keys'][3]['note'], 'pos': (89, 42)},
-    {'num': control_settings['keys'][4]['note'], 'pos': (114, 42)},
+    {'num': control_settings['keys'][i]['note'],
+     'pos': (12 + i * 21, 45)}
+    for i in range(6)
 ]
 keynote_labels = []
 for keynote in keynotes:
-    keynote_area = label.Label(terminalio.FONT,
-                               text=MIDI_NOTE_NAMES[keynote['num']],
-                               color=0x000000)
-    keynote_area.anchor_point = (0.5, 0.0)
-    keynote_area.anchored_position = (keynote['pos'][0], keynote['pos'][1])
-    keynote_labels.append(keynote_area)
-    keynote_maingroup.append(keynote_area)
+    note = label.Label(terminalio.FONT, text=MIDI_NOTE_NAMES[keynote['num']],
+                       color=0xFFFFFF)
+    note.anchor_point = (0.5, 0)
+    note.anchored_position = keynote['pos']
+    keynote_labels.append(note)
+    keynote_maingroup.append(note)
 maingroup.append(keynote_maingroup)
 
-# labels for potentiometers
-
 potval_maingroup = displayio.Group()
-potvals = [
-    {'num': "0", 'pos': (22, 10)},
-    {'num': "0", 'pos': (64, 10)},
-    {'num': "0", 'pos': (106, 10)},
-]
 potvals_labels = []
-
-for potval in potvals:
-    potval_area = label.Label(
-        terminalio.FONT,
-        text=potval['num'],
-        color=0x000000,
-    )
-    potval_area.anchor_point = (0.5, 0.0)
-    potval_area.anchored_position = (potval['pos'][0], potval['pos'][1])
-    potvals_labels.append(potval_area)
-    potval_maingroup.append(potval_area)
+for center in (21, 63, 106):
+    value = label.Label(terminalio.FONT, text="0", color=0x000000)
+    value.anchor_point = (0.5, 0)
+    value.anchored_position = (center, 18)
+    potvals_labels.append(value)
+    potval_maingroup.append(value)
 maingroup.append(potval_maingroup)
 
 # Create edit page
@@ -277,6 +290,8 @@ range_rectangle.hidden = True
 
 # Add the Group to the Display
 display.root_group = maingroup
+if oled_ready:
+    del splash, notes
 
 #  function to read analog input (average of 8 readings to calm ADC noise)
 def val(pin):
@@ -378,9 +393,8 @@ while True:
                 range_rectangle.hidden = True
     if encoder_button.short_count == 2:
         # send midi panic
-        panic = ControlChange(123, 120)
-        #  send CC message
-        midi.send(panic)
+        for channel in range(16):
+            midi.send(ControlChange(123, 0), channel=channel)
 
     # Handle long press in edit mode
     if edit_mode and encoder_button.long_press:
@@ -438,22 +452,38 @@ while True:
     event = keys.events.get()
 
     if event:
-        # event.key_number gives you the index (0-4) of which button
+        # event.key_number gives you the index (0-5) of which button
         key_index = event.key_number
 
         drums = (POT_C_INSTRUMENTS and current_instrument >= 0
                  and INSTRUMENTS[current_instrument][1] is None)
         key_settings = control_settings['keys'][key_index]
         key_note = DRUM_NOTES[key_index] if drums else key_settings['note']
+        key_channel = DRUM_CHANNEL if drums else key_settings['channel']
 
         if event.pressed:
             # Button was pressed - send NoteOn using settings
-            midi.send(NoteOn(key_note, key_settings['velocity']))
+            held_keys[key_index] = (key_note, key_channel)
+            midi.send(NoteOn(key_note, key_settings['velocity']), channel=key_channel)
+            key_panels[key_index].fill = 0xFFFFFF
+            keynote_labels[key_index].color = 0x000000
+            key_rings[key_index].hidden = False
+            key_ring_until[key_index] = time.monotonic() + 0.12
             print("Key", key_index + 1, "pressed -> note", MIDI_NOTE_NAMES[key_note])
 
         if event.released:
             # Button was released - send NoteOff using settings
-            midi.send(NoteOff(key_note, key_settings['velocity']))
+            off_note, off_channel = held_keys[key_index] or (key_note, key_channel)
+            midi.send(NoteOff(off_note, key_settings['velocity']), channel=off_channel)
+            held_keys[key_index] = None
+            key_panels[key_index].fill = None
+            keynote_labels[key_index].color = 0xFFFFFF
+
+    now = time.monotonic()
+    for key_index, until in enumerate(key_ring_until):
+        if until and now >= until:
+            key_rings[key_index].hidden = True
+            key_ring_until[key_index] = 0
 
     position = encoder.position
 
@@ -472,7 +502,7 @@ while True:
 
             # Remove old rectangle and create new one with updated dimensions
             maingroup.remove(rectangle)
-            rectangle = Rect(x, y, w, h, fill=None, outline=0xFFFFFF)
+            rectangle = RoundRect(x, y, w, h, 6, fill=None, outline=0xFFFFFF)
             maingroup.append(rectangle)
             last_position = position
 
@@ -572,7 +602,7 @@ while True:
         pot_settings = control_settings['pots'][0]
         modWheel = ControlChange(pot_settings['cc_num'], modulation)
         #  send CC message
-        midi.send(modWheel)
+        midi.send(modWheel, channel=pot_settings['channel'])
 
     pot_B_val1 = snap(pot_B_val1, 1)
     if abs(pot_B_val1 - pot_B_val2) > POT_DEADBAND or \
@@ -591,11 +621,11 @@ while True:
                 bend = 8192
             else:
                 bend = min(16383, ControllerB * 129)
-            midi.send(PitchBend(bend))
+            midi.send(PitchBend(bend), channel=pot_settings['channel'])
         else:
             ControlB = ControlChange(pot_settings['cc_num'], ControllerB)
             #  send CC message
-            midi.send(ControlB)
+            midi.send(ControlB, channel=pot_settings['channel'])
 
     pot_C_val1 = snap(pot_C_val1, 2)
     if abs(pot_C_val1 - pot_C_val2) > POT_DEADBAND or \
@@ -631,4 +661,4 @@ while True:
         else:
             ControlC = ControlChange(pot_settings['cc_num'], ControllerC)
             #  send CC message
-            midi.send(ControlC)
+            midi.send(ControlC, channel=pot_settings['channel'])
