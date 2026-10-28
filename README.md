@@ -7,7 +7,7 @@ This repository matches the [six-switch PCB design](https://spell.pcbcupid.com/e
 ## What you need
 
 - Glyph Mini 2040 with the six-switch controller PCB, six switches, three 10 kOhm linear potentiometers, a rotary encoder with push button, and a 128 x 64 I2C OLED.
-- A USB **data** cable and a Windows, Linux, or Android device with a MIDI app. VMPK is one Windows option.
+- A USB **data** cable and a Windows, Linux, macOS, or Android device with a MIDI app. VMPK is one Windows option; GarageBand works on macOS.
 - [CircuitPython 10.x for the Glyph Mini 2040](https://circuitpython.org/board/pcbcupid_glyph_mini_2040/) and the matching [10.x library bundle](https://circuitpython.org/libraries).
 
 CircuitPython 10.3.1 and the 10.x bundle were used during the board setup described here. Use the same major version for firmware and libraries.
@@ -29,7 +29,7 @@ The switches and encoder button use the RP2040's internal pull-ups; no external 
 
 ## Install on a new board
 
-1. Download the **Glyph Mini 2040** CircuitPython 10.x `.uf2` from the board link above. Hold the board's BOOT button while connecting USB. Windows should show an `RPI-RP2` drive.
+1. Download the **Glyph Mini 2040** CircuitPython 10.x `.uf2` from the board link above. Hold the board's BOOT button while connecting USB. Your computer should show an `RPI-RP2` drive (in File Explorer on Windows, Finder on macOS, or the file manager on Linux).
 2. Copy the `.uf2` to `RPI-RP2`. The board restarts as `CIRCUITPY`. Open `CIRCUITPY/boot_out.txt` and check that the Board ID says `pcbcupid_glyph_mini_2040`.
 3. Unzip the matching **10.x** CircuitPython library bundle. Copy these into `CIRCUITPY/lib/`:
    - Folders: `adafruit_midi`, `adafruit_display_text`, `adafruit_display_shapes`
@@ -54,6 +54,27 @@ If the serial log says `OLED found` but the picture is blank or shifted, check t
 If the input name is unclear, unplug the Glyph, note which MIDI input disappears, and reconnect it. Close other apps that may be holding the MIDI port while testing.
 
 To read a CircuitPython error, open the board's USB serial port in a serial terminal at 115200 baud. On Windows it appears as a USB Serial Device COM port. Press Ctrl+C to stop `code.py` and Ctrl+D to restart it. Close the terminal before another app needs that port.
+
+## Make sound on Linux
+
+The same CircuitPython and library installation above works on Linux. After connecting the board normally, open a terminal and run `aconnect -l` to find its ALSA MIDI **output** port. Its name may contain `CircuitPython` rather than `Glyph`.
+
+On Debian or Ubuntu, install a synth, a General MIDI SoundFont, and the ALSA tools:
+
+```sh
+sudo apt install fluidsynth fluid-soundfont-gm alsa-utils
+fluidsynth -a pulseaudio -m alsa_seq -o midi.autoconnect=1 /usr/share/sounds/sf2/FluidR3_GM.sf2
+```
+
+Leave FluidSynth running and press a physical switch. It automatically connects to available ALSA MIDI inputs. If you hear nothing, run `aconnect -l` again and check that the Glyph/CircuitPython output is connected to `FLUID Synth` input. To see raw events, run `aseqdump -l`, then `aseqdump -p CLIENT:PORT` using the board's port number shown there. If FluidSynth cannot open audio, run `fluidsynth -a help` and choose a driver supported by your system. On another Linux distribution, install the equivalent FluidSynth, SoundFont, and ALSA utility packages. See [FluidSynth's command-line examples](https://www.fluidsynth.org/wiki/ExampleCommandLines/) for other audio setups.
+
+## Make sound on macOS
+
+The same CircuitPython and library installation above works on macOS. Connect the Glyph normally, then open GarageBand and create a **Software Instrument** track. Select a piano or synth sound and press a physical switch; GarageBand receives USB MIDI from the board and plays the selected instrument. [Apple's GarageBand keyboard guide](https://support.apple.com/guide/garageband/connect-a-music-keyboard-gbndfe7f6293/mac) covers this setup.
+
+If GarageBand does not respond, open **Audio MIDI Setup > Window > Show MIDI Studio** and check for the Glyph/CircuitPython MIDI device. Use **Rescan MIDI** if it is missing, then reconnect the board and reopen GarageBand. [Apple's MIDI Studio guide](https://support.apple.com/guide/audio-midi-setup/midi-studio-window-ams1001/mac) shows the device list and rescan control.
+
+For serial errors, the board appears as `/dev/ttyACM*` on Linux or `/dev/cu.usbmodem*` on macOS. The serial console uses the same Ctrl+C/Ctrl+D controls described above.
 
 ## Controls and screen
 
